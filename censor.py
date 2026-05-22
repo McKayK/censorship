@@ -67,6 +67,16 @@ Whisper model sizes (bigger = more accurate, slower):
         default=" (Censored)",
         help="Text appended to the title metadata tag (default: ' (Censored)')",
     )
+    parser.add_argument(
+        "--start", "-s",
+        default=None,
+        help="Start time to process from, e.g. 1:32:10 or 5420 (seconds). Useful for testing a chapter.",
+    )
+    parser.add_argument(
+        "--end", "-e",
+        default=None,
+        help="End time to process to, e.g. 1:45:00 or 6300 (seconds).",
+    )
 
     args = parser.parse_args()
 
@@ -90,6 +100,10 @@ Whisper model sizes (bigger = more accurate, slower):
     print(f"🔊 Bitrate: {args.bitrate}")
     print()
 
+    from censor_core import _parse_time
+    start_time = _parse_time(args.start) if args.start else None
+    end_time   = _parse_time(args.end)   if args.end   else None
+
     result = censor_audiobook(
         input_path=input_path,
         output_path=output_path,
@@ -97,6 +111,8 @@ Whisper model sizes (bigger = more accurate, slower):
         beam_size=args.beam_size,
         audio_bitrate=args.bitrate,
         title_suffix=args.title_suffix,
+        start_time=start_time,
+        end_time=end_time,
         progress_cb=print,
     )
 

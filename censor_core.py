@@ -27,9 +27,13 @@ log = logging.getLogger(__name__)
 # on words like "efflorescence", "focus", "fucks" misheard as "flux", etc.
 # ---------------------------------------------------------------------------
 _FWORD_RE = re.compile(
-    r"^(mother)?f[u#@u0]?[ck]k?(ing?|ed?|ers?|s|'s|in'|ery)?$",
+    r"^(cluster|mind|butt|ass|mother|un)?f[u#@u0]?[ck]k?(ing?|ed?|ers?|s|'s|in'|ery|wit|face|head|boy|tard|up|wad|nugget|stick)?$",
     re.IGNORECASE,
 )
+
+# Known words that match the pattern but are NOT the f-word.
+# Add to this list if you encounter new false positives.
+_FWORD_BLOCKLIST = {"fuca", "focus", "fuchsia", "fucan", "fucus"}
 
 # Spoken word splits Whisper sometimes produces, e.g. "f" + "uck"
 _FWORD_PREFIX = re.compile(r"^(mother)?f[u*#@uo0]?$", re.IGNORECASE)
@@ -60,7 +64,10 @@ def _strip(w: str) -> str:
 
 
 def _is_fword(word: str) -> bool:
-    return bool(_FWORD_RE.match(_strip(word)))
+    stripped = _strip(word).lower()
+    if stripped in _FWORD_BLOCKLIST:
+        return False
+    return bool(_FWORD_RE.match(stripped))
 
 
 def _is_split_fword(w1: str, w2: str) -> bool:
@@ -71,8 +78,8 @@ def _is_split_fword(w1: str, w2: str) -> bool:
 # How far into an adjacent gap we're willing to extend the mute window.
 # Only applies when there's actually a gap — if the previous word ends right
 # before ours starts, we won't eat into it.
-MUTE_MAX_PRE  = 0.08  # max seconds to steal before the word
-MUTE_MAX_POST = 0.1  # max seconds to steal after the word
+MUTE_MAX_PRE  = 0.3   # max seconds to steal before the word — F consonant needs more lead
+MUTE_MAX_POST = 0.2   # max seconds to steal after the word
 
 def _padded(start: float, end: float, prev_end: float | None, next_start: float | None) -> tuple[float, float]:
     """
@@ -95,6 +102,38 @@ def _padded(start: float, end: float, prev_end: float | None, next_start: float 
         end = end + MUTE_MAX_POST
 
     return max(0.0, start), end
+
+
+def _parse_time(t: str) -> float:
+    """Parse HH:MM:SS or MM:SS or raw seconds into float seconds."""
+    if t is None:
+        return None
+    parts = t.strip().split(":")
+    parts = [float(p) for p in parts]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    elif len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return float(parts[0])
+
+
+def _extract_segment(audio_path: Path, out_path: Path, start: float | None, end: float | None) -> Path:
+    """
+    Extract a time range from the audio using ffmpeg stream copy (instant, no re-encode).
+    Returns out_path if extraction happened, audio_path if no range specified.
+    """
+    if start is None and end is None:
+        return audio_path
+    cmd = ["ffmpeg", "-y"]
+    if start:
+        cmd += ["-ss", str(start)]
+    cmd += ["-i", str(audio_path)]
+    if end:
+        duration = (end - (start or 0))
+        cmd += ["-t", str(duration)]
+    cmd += ["-c", "copy", str(out_path)]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out_path
 
 
 def _get_duration(audio_path: Path) -> float:
@@ -191,11 +230,15 @@ def transcribe_and_collect(
     model_size: str = "small",
     beam_size: int = 5,
     chunk_minutes: int = 30,
+    start_time: float | None = None,
+    end_time: float | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> CensorResult:
     """
     Split audio into chunks, transcribe each one, collect all mute intervals.
     Chunking keeps RAM usage low regardless of book length (~200 MB per chunk).
+    Optional start_time/end_time (seconds) process only a slice of the file —
+    mute timestamps are automatically offset back to full-file positions.
     """
     import tempfile, shutil
 
@@ -213,6 +256,14 @@ def transcribe_and_collect(
 
     tmp_dir = Path(tempfile.mkdtemp())
     try:
+        # Optionally extract a time slice for faster testing
+        time_offset = start_time or 0.0
+        if start_time is not None or end_time is not None:
+            seg_path = Path(tmp_dir) / ("segment" + audio_path.suffix)
+            audio_path = _extract_segment(audio_path, seg_path, start_time, end_time)
+            end_label = f"{end_time/3600:.2f}h" if end_time else "end"
+            _log(f"Processing slice {time_offset/3600:.2f}h → {end_label}")
+
         _log(f"Splitting into {chunk_minutes}-minute chunks for processing…")
         chunks = _split_to_chunks(audio_path, tmp_dir, chunk_seconds=chunk_minutes * 60)
         _log(f"  Created {len(chunks)} chunk(s).")
@@ -222,7 +273,7 @@ def transcribe_and_collect(
         for idx, (chunk_path, offset) in enumerate(chunks):
             pct = offset / total_duration * 100 if total_duration else 0
             _log(f"  [{idx + 1}/{len(chunks)}] Transcribing chunk at {offset / 3600:.1f}h  ({pct:.0f}%)…")
-            chunk_mutes = _collect_mutes_from_chunk(model, chunk_path, offset, beam_size)
+            chunk_mutes = _collect_mutes_from_chunk(model, chunk_path, offset + time_offset, beam_size)
             for m in chunk_mutes:
                 _log(f"    🚫 '{m.word}' at {m.start:.2f}s")
             all_mutes.extend(chunk_mutes)
@@ -268,6 +319,8 @@ def apply_mutes_ffmpeg(
     mutes: list[MuteInterval],
     audio_bitrate: str = "192k",
     title_suffix: str = " (Censored)",
+    start_time: float | None = None,
+    end_time: float | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> None:
     """
@@ -290,7 +343,12 @@ def apply_mutes_ffmpeg(
         )
         return
 
-    vf = _build_volume_filter(mutes)
+    # If processing a slice, shift mute timestamps to be relative to the slice start
+    if start_time:
+        adjusted_mutes = [MuteInterval(m.start - start_time, m.end - start_time, m.word) for m in mutes]
+    else:
+        adjusted_mutes = mutes
+    vf = _build_volume_filter(adjusted_mutes)
     suffix = output_path.suffix.lower()
 
     # Choose output codec based on container
@@ -318,16 +376,22 @@ def apply_mutes_ffmpeg(
     new_title = (original_title + title_suffix) if original_title else title_suffix.strip()
     _log(f"  Title tag: '{original_title}' → '{new_title}'")
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(input_path),
+    cmd = ["ffmpeg", "-y"]
+
+    # If a time range is specified, only encode that slice (much faster for testing)
+    if start_time is not None:
+        cmd += ["-ss", str(start_time)]
+    cmd += ["-i", str(input_path)]
+    if end_time is not None:
+        duration = end_time - (start_time or 0)
+        cmd += ["-t", str(duration)]
+
+    cmd += [
         "-af", vf,
         "-c:a", *audio_codec,
-        # Preserve all non-audio streams (chapters, cover art, metadata)
         "-c:v", "copy",
         "-map_metadata", "0",
         "-map_chapters", "0",
-        # Override just the title — everything else (author, album, year…) is kept
         "-metadata", f"title={new_title}",
         str(output_path),
     ]
@@ -355,6 +419,8 @@ def censor_audiobook(
     chunk_minutes: int = 30,
     audio_bitrate: str = "192k",
     title_suffix: str = " (Censored)",
+    start_time: float | None = None,
+    end_time: float | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> CensorResult:
     """
@@ -366,6 +432,8 @@ def censor_audiobook(
         model_size=model_size,
         beam_size=beam_size,
         chunk_minutes=chunk_minutes,
+        start_time=start_time,
+        end_time=end_time,
         progress_cb=progress_cb,
     )
     apply_mutes_ffmpeg(
@@ -374,6 +442,8 @@ def censor_audiobook(
         result.mutes,
         audio_bitrate=audio_bitrate,
         title_suffix=title_suffix,
+        start_time=start_time,
+        end_time=end_time,
         progress_cb=progress_cb,
     )
     return result

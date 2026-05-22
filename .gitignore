@@ -1,0 +1,55 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Audio files — too large for git
+*.m4b
+*.m4a
+*.mp3
+*.mp4
+*.aac
+*.ogg
+*.flac
+*.wav
+*.wma
+
+# Output files
+*_censored*
+
+# Whisper model cache
+~/.cache/huggingface/
+~/.cache/whisper/
+
+# Temp chunk directories (created during processing)
+chunks/
+censored_chunks/
+output/
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Pytest
+.pytest_cache/
+.coverage
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

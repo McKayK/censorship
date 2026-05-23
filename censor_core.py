@@ -141,9 +141,9 @@ def _get_duration(audio_path: Path) -> float:
     import json
     result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(audio_path)],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
-    if result.returncode == 0:
+    if result.returncode == 0 and result.stdout:
         fmt = json.loads(result.stdout).get("format", {})
         return float(fmt.get("duration", 0))
     return 0.0
@@ -365,10 +365,10 @@ def apply_mutes_ffmpeg(
     # so we read it first then pass the modified value explicitly.
     probe = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(input_path)],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     original_title = ""
-    if probe.returncode == 0:
+    if probe.returncode == 0 and probe.stdout:
         import json
         fmt = json.loads(probe.stdout).get("format", {})
         original_title = fmt.get("tags", {}).get("title", "") or fmt.get("tags", {}).get("TITLE", "")
@@ -400,7 +400,7 @@ def apply_mutes_ffmpeg(
     _log(f"  Input:  {input_path}")
     _log(f"  Output: {output_path}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{result.stderr}")
 
